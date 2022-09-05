@@ -210,7 +210,7 @@ def drawing_zed(frame_queue, detections_queue, fps_queue):
                 cv2.imshow('Inference', image)
             if args.out_filename is not None:
                 video.write(image)
-            if cv2.waitKey(fps) == 27:
+            if cv2.waitKey(fps+1) == 27:
                 break
     zed.close()
     if args.out_filename is not None:
@@ -241,8 +241,8 @@ if __name__ == '__main__':
 
         # Create a InitParameters object and set configuration parameters
         init_params = sl.InitParameters()
-        init_params.camera_resolution = sl.RESOLUTION.HD1080  # Use HD1080 video mode
-        init_params.camera_fps = 30  # Set fps at 30
+        init_params.camera_resolution = sl.RESOLUTION.HD720  # Use HD1080 video mode
+        init_params.camera_fps = 15  # Set fps at 30
 
         # Open the camera
         err = zed.open(init_params)
