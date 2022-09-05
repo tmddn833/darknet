@@ -7,6 +7,7 @@ import darknet
 import argparse
 from threading import Thread, enumerate
 from queue import Queue
+import pyzed.sl as sl
 
 
 def parser():
@@ -119,6 +120,24 @@ def video_capture(frame_queue, darknet_image_queue):
         darknet_image_queue.put(img_for_detect)
     cap.release()
 
+def video_capture_zed(frame_queue, darknet_image_queue):
+    while zed.is_opened():
+        zed.retrieve_image(image, sl.VIEW.LEFT)
+        frame = image.get_data()
+        # frame_rgb = image.get_data()
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if zed.grab(runtime_parameters) == sl.ERROR_CODE.SUCCESS:
+            frame_resized = cv2.resize(frame_rgb, (darknet_width, darknet_height),
+                                       interpolation=cv2.INTER_LINEAR)
+        else:
+            pass
+            print("zed is not operating correctly")
+        frame_queue.put(frame)
+        img_for_detect = darknet.make_image(darknet_width, darknet_height, 3)
+        darknet.copy_image_from_bytes(img_for_detect, frame_resized.tobytes())
+        darknet_image_queue.put(img_for_detect)
+    zed.close()
+
 
 def inference(darknet_image_queue, detections_queue, fps_queue):
     while cap.isOpened():
@@ -132,6 +151,19 @@ def inference(darknet_image_queue, detections_queue, fps_queue):
         darknet.print_detections(detections, args.ext_output)
         darknet.free_image(darknet_image)
     cap.release()
+
+def inference_zed(darknet_image_queue, detections_queue, fps_queue):
+    while zed.is_opened():
+        darknet_image = darknet_image_queue.get()
+        prev_time = time.time()
+        detections = darknet.detect_image(network, class_names, darknet_image, thresh=args.thresh)
+        detections_queue.put(detections)
+        fps = int(1/(time.time() - prev_time))
+        fps_queue.put(fps)
+        print("FPS: {}".format(fps))
+        darknet.print_detections(detections, args.ext_output)
+        darknet.free_image(darknet_image)
+    zed.close()
 
 
 def drawing(frame_queue, detections_queue, fps_queue):
@@ -157,6 +189,34 @@ def drawing(frame_queue, detections_queue, fps_queue):
     video.release()
     cv2.destroyAllWindows()
 
+def drawing_zed(frame_queue, detections_queue, fps_queue):
+    random.seed(3)  # deterministic bbox colors
+    if args.out_filename is not None:
+        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+        fps = int(zed.get_current_fps())
+        video = cv2.VideoWriter(args.out_filename, fourcc, fps, (video_width, video_height))
+
+    while zed.is_opened():
+        frame = frame_queue.get()
+        detections = detections_queue.get()
+        fps = fps_queue.get()
+        detections_adjusted = []
+        if frame is not None:
+            for label, confidence, bbox in detections:
+                bbox_adjusted = convert2original(frame, bbox)
+                detections_adjusted.append((str(label), confidence, bbox_adjusted))
+            image = darknet.draw_boxes(detections_adjusted, frame, class_colors)
+            if not args.dont_show:
+                cv2.imshow('Inference', image)
+            if args.out_filename is not None:
+                video.write(image)
+            if cv2.waitKey(fps) == 27:
+                break
+    zed.close()
+    if args.out_filename is not None:
+        video.release()
+    cv2.destroyAllWindows()
+
 
 if __name__ == '__main__':
     frame_queue = Queue()
@@ -174,10 +234,37 @@ if __name__ == '__main__':
         )
     darknet_width = darknet.network_width(network)
     darknet_height = darknet.network_height(network)
-    input_path = str2int(args.input)
-    cap = cv2.VideoCapture(input_path)
-    video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    Thread(target=video_capture, args=(frame_queue, darknet_image_queue)).start()
-    Thread(target=inference, args=(darknet_image_queue, detections_queue, fps_queue)).start()
-    Thread(target=drawing, args=(frame_queue, detections_queue, fps_queue)).start()
+    if args.input == 'zed':
+
+        # Create a Camera object
+        zed = sl.Camera()
+
+        # Create a InitParameters object and set configuration parameters
+        init_params = sl.InitParameters()
+        init_params.camera_resolution = sl.RESOLUTION.HD1080  # Use HD1080 video mode
+        init_params.camera_fps = 30  # Set fps at 30
+
+        # Open the camera
+        err = zed.open(init_params)
+        if err != sl.ERROR_CODE.SUCCESS:
+            exit(1)
+        image = sl.Mat()
+        runtime_parameters = sl.RuntimeParameters()
+
+        zed.retrieve_image(image, sl.VIEW.LEFT)
+        if zed.grab(runtime_parameters) == sl.ERROR_CODE.SUCCESS:
+            zed.retrieve_image(image, sl.VIEW.LEFT)
+
+        video_width = int(image.get_width())
+        video_height = int(image.get_height())
+        Thread(target=video_capture_zed, args=(frame_queue, darknet_image_queue)).start()
+        Thread(target=inference_zed, args=(darknet_image_queue, detections_queue, fps_queue)).start()
+        Thread(target=drawing_zed, args=(frame_queue, detections_queue, fps_queue)).start()
+    else :
+        input_path = str2int(args.input)
+        cap = cv2.VideoCapture(input_path)
+        video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        Thread(target=video_capture, args=(frame_queue, darknet_image_queue)).start()
+        Thread(target=inference, args=(darknet_image_queue, detections_queue, fps_queue)).start()
+        Thread(target=drawing, args=(frame_queue, detections_queue, fps_queue)).start()
